@@ -1,9 +1,9 @@
 # shurectl — Project Instructions
 
 The goal of this project is to build and maintain **shurectl**, an open-source terminal UI
-configurator for Shure USB audio interfaces (MVX2U Gen 1/Gen 2, MV6, and MV7+) on Linux
-and macOS. It replaces the Windows/Mac-only ShurePlus MOTIV Desktop app by communicating
-with devices directly over USB HID.
+configurator for Shure USB audio interfaces (MVX2U Gen 1/Gen 2, MV6, and MV7+) on Linux,
+macOS, and Windows. It replaces the Windows/Mac-only ShurePlus MOTIV Desktop app by
+communicating with devices directly over USB HID.
 
 This is a Rust project. Operate as a senior Rust developer: write clean, readable, maintainable
 code. Avoid clever abstractions. The simple, obvious solution is almost always correct.
@@ -49,9 +49,10 @@ This is a single-crate Rust binary. All source lives under `src/`:
 
 ```
 src/
-  main.rs       # Entry point, CLI args (--demo, --list), event loop, key handling
+  main.rs       # Entry point, CLI args + subcommands, event loop, key handling, apply_action
   app.rs        # Application state: Tab, Focus, DeviceState, DeviceAction events
   device.rs     # hidapi wrapper: open ShureDevice, send/receive HID reports, model dispatch
+  headless.rs   # JSON get/set/preset CLI for scripting and agents (no TUI)
   meter.rs      # cpal audio capture: real-time dBFS metering, RollingWindow, PeakWindow
   presets.rs    # Host-side preset storage: TOML serialisation, load/save/delete, PresetSlot
   protocol.rs   # Packet encoding, CRC-16/ANSI, all command constructors, apply_response()
@@ -59,6 +60,8 @@ src/
 ```
 
 **Data flow:** key event → `handle_key()` → `DeviceAction` → `apply_action()` → `device.rs` → HID packet → `protocol.rs`
+
+**Headless data flow:** subcommand → `headless::run()` → `device.rs` get_state/set_* → HID packet. The TUI and `headless.rs` are independent consumers of `device.rs`; neither calls the other.
 
 **Meter data flow:** cpal audio callback → `meter_level` (AtomicI32) + `peak_window` (Mutex<PeakWindow>) → `ui.rs` reads on each render tick
 
@@ -97,7 +100,8 @@ exactly 64 bytes, sent via `hid_write()` and received via `hid_read()`:
 - **Report ID**: `0x01` — required as byte 0 by hidapi's `hid_write()`; our buffers are 65 bytes total (1 report ID + 64 payload)
 - **CRC**: CRC-16/ANSI — poly `0x8005`, init `0x0000`, reflected input and output (NOT CCITT-FALSE)
 - **Transport**: plain HID Output Reports (`hid_write`) for commands; Input Reports (`hid_read`) for responses — `HIDIOCSFEATURE`/`HIDIOCGFEATURE` are NOT used
-- **Interface**: accessed via `/dev/hidrawN`, not the USB audio class interface
+- **Interface**: accessed via `/dev/hidrawN` on Linux (Windows uses `\\?\HID#VID_...` paths), not the USB audio class interface
+- **Windows HID collections**: Windows enumerates each top-level HID collection as a separate device path, so one mic appears as two entries. The config protocol lives on the vendor collection (usage page `0xFF01`); the second is a telephony/consumer collection (`0x000B`) for the mute button. `device.rs::shure_devices()` filters to the vendor usage-page collection. On Linux all collections share one `/dev/hidrawN` path and dedup-by-path collapses them, so the filter is a harmless refinement there.
 - **SET + CONFIRM**: every SET command must be immediately followed by a CONFIRM packet (`CMD_CONFIRM`); the device will not apply the change without it
 
 All command byte values and feature address constants live in `protocol.rs`.
@@ -217,6 +221,29 @@ Preset name editing is handled in `main.rs::handle_key()`, not in `toggle_focuse
 When `app.editing_preset_name` is `true`, character keys append to the name and `Enter`
 commits (fires `PersistPresetName`), while `Esc` cancels without saving.
 
+### Headless CLI
+
+`headless.rs` is the non-TUI JSON interface (`get`, `set <setting> <value>`,
+`preset list|save|load|delete`). It opens the device and calls the same typed
+`device.rs` methods the TUI uses, then prints one JSON object to stdout. Errors
+print `{"error": ...}` and `exit(1)`.
+
+Key patterns:
+- **Reuses `PresetSlot` for output.** `get` builds its `settings` body from
+  `PresetSlot::from_device_state` and strips the `name` field. Do not add a parallel
+  state DTO — the preset mirror types are the single serialisation source.
+- **`set` enum tokens come from `Ser*` deserialisation.** A setting like `compressor`
+  parses its value by deserialising into `SerCompressorPreset`, so the accepted
+  tokens are exactly what `get` emits (input/output symmetry) and the serde error
+  lists valid variants for free.
+- **Catalog is the single source of truth.** `catalog()` lists every setting, its
+  accepted values, and the models it applies to. `ensure_supported()` (applicability
+  check) and `set help` both read it. When adding a settable field: add a `catalog()`
+  entry, a `dispatch_set()` arm, and extend the `every_catalog_entry_has_a_dispatch_arm`
+  test's name set.
+- **`apply_preset_to_device()` lives in `main.rs`** and is shared by the TUI's
+  `LoadPreset` and headless `preset load`. It sends every model-relevant SET.
+
 ### Demo Mode
 
 `--demo` runs with `device: None`. `send_if_connected()` silently succeeds when
@@ -227,12 +254,14 @@ This is intentional: demo mode should always be fully navigable.
 
 - `ratatui 0.30` — TUI rendering; use `Frame::render_widget()`, not direct buffer writes
 - `crossterm 0.29` — terminal backend and key events; `KeyEventKind::Press` only
-- `hidapi 2.4` (linux-native feature) — HID device open/read/write via `/dev/hidrawN`
+- `hidapi 2.4` — HID device open/read/write. Per-OS features: `linux-native` (`/dev/hidrawN`),
+  `macos-shared-device`, and the default Windows backend (HID paths like `\\?\HID#VID_...`)
 - `cpal 0.17` — audio capture for the input level meter; default input device only
-- `libc 0.2` — stderr suppression during cpal ALSA/JACK probing (`dup`/`dup2`)
+- `libc 0.2` (unix only) — stderr suppression during cpal ALSA/JACK probing (`dup`/`dup2`)
 - `anyhow` — all fallible functions return `anyhow::Result`
 - `clap 4.5` — CLI argument parsing; `derive` feature only
 - `serde 1` (with `derive` feature) — serialisation traits for preset TOML files
+- `serde_json 1` — JSON output for the headless `get`/`set`/`preset` CLI
 - `toml 0.8` — TOML serialisation/deserialisation for preset files
 - `dirs-next 2.0` — platform config directory resolution (`~/.config/` on Linux)
 - `tempfile 3` (dev-dependency) — hermetic temp directories in `presets.rs` tests

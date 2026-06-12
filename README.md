@@ -1,7 +1,7 @@
 # shurectl
 
 An open-source terminal UI configurator for the Shure XLR-to-USB audio
-interfaces and microphones on Linux and macOS. Replaces the Windows/Mac-only ShurePlus MOTIV Desktop app.
+interfaces and microphones on Linux, macOS, and Windows. Replaces the Windows/Mac-only ShurePlus MOTIV Desktop app.
 
 ![Project Example Screenshot](images/shurectl.png)
 
@@ -92,6 +92,17 @@ shurectl --list
 On macOS, IOKit grants user-space access to HID devices without extra configuration.
 Plug in your device and run `shurectl --list` to confirm detection.
 
+### Windows — No Extra Setup Required
+
+Windows grants user-space HID access out of the box. Plug in your device and run
+`shurectl --list` to confirm detection. Device paths look like
+`\\?\HID#VID_14ED&PID_1026&...` rather than `/dev/hidrawN`.
+
+Building from source needs the MSVC toolchain (the default `rustup` host on Windows)
+and the Microsoft C++ Build Tools with the "MSVC v143 x64/x86 build tools" and
+"Windows SDK" components. Build from a "Developer PowerShell for VS" so the linker is
+on `PATH`.
+
 ---
 
 ## Installing
@@ -134,6 +145,29 @@ shurectl --device <path>         # Connect to a specific device (use --list to f
 shurectl --demo                  # Run without a device (explore the UI)
 shurectl --list                  # List detected Shure devices and exit
 ```
+
+### Headless / scripting (JSON)
+
+For automation and agents, subcommands skip the TUI and speak JSON on stdout. On
+error a `{"error": ...}` object is printed and the process exits non-zero, so a
+caller can branch on the exit code alone.
+
+```bash
+shurectl get                     # Print the full device state as JSON
+shurectl set gain 24             # Apply one setting, print the resulting state
+shurectl set mute on             # Booleans accept on/off, true/false, 1/0
+shurectl set hpf hz75            # Enums use the same tokens that `get` emits
+shurectl set led-solid-rgb B2FF33   # RGB as hex RRGGBB or r,g,b
+shurectl set help                # List every setting, its values, and supported models
+shurectl preset list             # All 4 preset slots as JSON
+shurectl preset save 1           # Snapshot current device state into slot 1
+shurectl preset load 1           # Apply slot 1 to the device
+shurectl preset delete 1         # Delete slot 1
+```
+
+`set` validates against the connected model: a setting that doesn't apply (e.g.
+`phantom` on an MV6, or `led-*` on a non-MV7+) returns an error rather than a
+silent no-op. `--device <path>` works with any subcommand.
 
 ### Keyboard Shortcuts
 
@@ -181,7 +215,7 @@ On the **Presets tab**:
 ## Troubleshooting
 
 **"Cannot open device"** — device not found or a permissions issue.
-Run `shurectl --list` to check detection. On Linux, try `sudo shurectl` to confirm it's a udev permissions issue. On macOS, ensure no other software has exclusive access to the device.
+Run `shurectl --list` to check detection. On Linux, try `sudo shurectl` to confirm it's a udev permissions issue. On macOS and Windows, ensure no other software (e.g. ShurePlus MOTIV) has exclusive access to the device.
 
 **Gain slider is greyed out in Auto Level mode** — This is correct hardware behaviour;
 the device ignores gain commands in Auto Level mode. Switch to Manual mode first.
